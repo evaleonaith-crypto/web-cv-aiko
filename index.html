@@ -306,6 +306,19 @@
       color: var(--muted);
       margin-top: 4px;
     }
+
+    .mobile-only {
+      display: none;
+    }
+
+    @media (max-width: 768px) {
+      .mobile-only {
+        display: inline-flex;
+      }
+      .desktop-only {
+        display: none;
+      }
+    }
   </style>
 </head>
 <body>
@@ -332,10 +345,15 @@
 
       <div class="controls">
         <div class="btn-row">
-          <button id="btnFront" class="btn-secondary">📷 Kamera Depan</button>
-          <button id="btnBack" class="btn-secondary">📷 Kamera Belakang</button>
-          <button id="btnOff" class="btn-secondary" disabled>⏹ Matikan Kamera</button>
-          <button id="btnDetect" class="btn-primary" disabled>🔍 Deteksi Sekarang</button>
+          <!-- Tombol utama: nyalakan/matikan kamera (desktop & mobile) -->
+          <button id="btnToggleCam" class="btn-primary">🎥 Nyalakan Kamera</button>
+
+          <!-- Opsi depan/belakang hanya di HP -->
+          <button id="btnFront" class="btn-secondary mobile-only">📷 Depan</button>
+          <button id="btnBack" class="btn-secondary mobile-only">📷 Belakang</button>
+
+          <!-- Deteksi -->
+          <button id="btnDetect" class="btn-secondary" disabled>🔍 Deteksi Sekarang</button>
         </div>
         <div class="status-pill">
           <span id="statusDot" class="status-dot"></span>
@@ -377,9 +395,9 @@
     const overlayCanvas = document.getElementById("overlayCanvas");
     const ctxOverlay = overlayCanvas.getContext("2d");
 
+    const btnToggleCam = document.getElementById("btnToggleCam");
     const btnFront = document.getElementById("btnFront");
     const btnBack = document.getElementById("btnBack");
-    const btnOff = document.getElementById("btnOff");
     const btnDetect = document.getElementById("btnDetect");
     const statusDot = document.getElementById("statusDot");
     const statusText = document.getElementById("statusText");
@@ -391,7 +409,10 @@
     let currentStream = null;
     let cameraOn = false;
     let busy = false;
-    let currentFacing = "user"; // 'user' = depan, 'environment' = belakang
+
+    // Deteksi sederhana: mobile vs desktop
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (window.innerWidth < 768);
+    let currentFacing = isMobile ? "environment" : "user"; // HP default belakang, laptop default webcam depan
 
     function setStatus({ live = false, text = "" }) {
       statusDot.classList.toggle("live", live);
@@ -415,8 +436,13 @@
     }
 
     function updateButtons() {
-      btnOff.disabled = !cameraOn;
       btnDetect.disabled = !cameraOn || busy;
+      btnToggleCam.disabled = busy;
+      if (!cameraOn) {
+        btnToggleCam.textContent = "🎥 Nyalakan Kamera";
+      } else {
+        btnToggleCam.textContent = "⏹ Matikan Kamera";
+      }
     }
 
     function stopCamera() {
@@ -431,29 +457,36 @@
       updateButtons();
     }
 
-    async function startCamera(facing = "user") {
+    async function startCamera(facing = currentFacing) {
       setError("");
       currentFacing = facing;
 
       try {
-        btnFront.disabled = true;
-        btnBack.disabled = true;
-        btnOff.disabled = true;
-        btnDetect.disabled = true;
+        busy = true;
+        updateButtons();
         setStatus({ live: false, text: "Mengaktifkan kamera..." });
 
-        // Matikan stream lama kalau ada
         if (currentStream) {
           currentStream.getTracks().forEach(t => t.stop());
           currentStream = null;
         }
 
-        const constraints = {
-          video: {
-            facingMode: { ideal: facing }
-          },
-          audio: false
-        };
+        let constraints;
+        if (isMobile) {
+          // HP: gunakan facingMode
+          constraints = {
+            video: {
+              facingMode: { ideal: facing }
+            },
+            audio: false
+          };
+        } else {
+          // Laptop/PC: pakai default webcam (tidak pakai facingMode)
+          constraints = {
+            video: true,
+            audio: false
+          };
+        }
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         currentStream = stream;
@@ -467,18 +500,30 @@
         });
 
         cameraOn = true;
-        const facingLabel = facing === "environment" ? "belakang" : "depan";
-        setStatus({ live: true, text: `Kamera ${facingLabel} aktif – siap deteksi` });
+        const label = isMobile
+          ? (facing === "environment" ? "belakang" : "depan")
+          : "webcam";
+
+        setStatus({ live: true, text: `Kamera ${label} aktif – siap deteksi` });
       } catch (err) {
         console.error(err);
-        setError("Gagal mengakses kamera. Pastikan izin kamera sudah diberikan di browser.");
+        setError("Gagal mengakses kamera. Pastikan izin kamera sudah diberikan di browser (HTTPS & Allow Camera).");
         setStatus({ live: false, text: "Kamera gagal diaktifkan" });
         cameraOn = false;
         currentStream = null;
       } finally {
-        btnFront.disabled = false;
-        btnBack.disabled = false;
+        busy = false;
         updateButtons();
+      }
+    }
+
+    async function handleToggleCamera() {
+      setError("");
+      if (cameraOn) {
+        stopCamera();
+      } else {
+        // Pertama kali: di HP default kamera belakang, di laptop default webcam
+        await startCamera(currentFacing);
       }
     }
 
@@ -616,10 +661,16 @@
     }
 
     // Event listeners
-    btnFront.addEventListener("click", () => startCamera("user"));
-    btnBack.addEventListener("click", () => startCamera("environment"));
-    btnOff.addEventListener("click", stopCamera);
+    btnToggleCam.addEventListener("click", handleToggleCamera);
     btnDetect.addEventListener("click", captureAndDetect);
+
+    // Hanya aktif di HP (tombol sudah di-hide di desktop lewat CSS)
+    btnFront.addEventListener("click", () => {
+      if (!busy) startCamera("user");
+    });
+    btnBack.addEventListener("click", () => {
+      if (!busy) startCamera("environment");
+    });
 
     window.addEventListener("resize", () => {
       if (cameraOn) resizeOverlay();
@@ -628,9 +679,7 @@
     // Cek support kamera
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setError("Browser ini belum mendukung akses kamera (getUserMedia). Coba gunakan Chrome atau Edge versi terbaru.");
-      btnFront.disabled = true;
-      btnBack.disabled = true;
-      btnOff.disabled = true;
+      btnToggleCam.disabled = true;
       btnDetect.disabled = true;
       setStatus({ live: false, text: "Browser tidak mendukung kamera" });
     }
