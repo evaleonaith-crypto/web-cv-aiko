@@ -326,14 +326,16 @@
 
     <div class="left">
       <div class="video-wrapper">
-        <video id="video" autoplay playsinline></video>
+        <video id="video" autoplay playsinline muted></video>
         <canvas id="overlayCanvas"></canvas>
       </div>
 
       <div class="controls">
         <div class="btn-row">
-          <button id="btnCamera" class="btn-primary">🎥 Nyalakan Kamera</button>
-          <button id="btnDetect" class="btn-secondary" disabled>🔍 Deteksi Sekarang</button>
+          <button id="btnFront" class="btn-secondary">📷 Kamera Depan</button>
+          <button id="btnBack" class="btn-secondary">📷 Kamera Belakang</button>
+          <button id="btnOff" class="btn-secondary" disabled>⏹ Matikan Kamera</button>
+          <button id="btnDetect" class="btn-primary" disabled>🔍 Deteksi Sekarang</button>
         </div>
         <div class="status-pill">
           <span id="statusDot" class="status-dot"></span>
@@ -375,7 +377,9 @@
     const overlayCanvas = document.getElementById("overlayCanvas");
     const ctxOverlay = overlayCanvas.getContext("2d");
 
-    const btnCamera = document.getElementById("btnCamera");
+    const btnFront = document.getElementById("btnFront");
+    const btnBack = document.getElementById("btnBack");
+    const btnOff = document.getElementById("btnOff");
     const btnDetect = document.getElementById("btnDetect");
     const statusDot = document.getElementById("statusDot");
     const statusText = document.getElementById("statusText");
@@ -384,9 +388,10 @@
     const detList = document.getElementById("detList");
     const lastTime = document.getElementById("lastTime");
 
-    let stream = null;
+    let currentStream = null;
     let cameraOn = false;
     let busy = false;
+    let currentFacing = "user"; // 'user' = depan, 'environment' = belakang
 
     function setStatus({ live = false, text = "" }) {
       statusDot.classList.toggle("live", live);
@@ -404,71 +409,103 @@
     }
 
     function resizeOverlay() {
-      const rect = video.getBoundingClientRect();
-      overlayCanvas.width = video.videoWidth || rect.width;
-      overlayCanvas.height = video.videoHeight || rect.height;
+      if (!video.videoWidth || !video.videoHeight) return;
+      overlayCanvas.width = video.videoWidth;
+      overlayCanvas.height = video.videoHeight;
     }
 
-    async function startCamera() {
-      setError("");
-      if (cameraOn) {
-        // Matikan kamera
-        if (stream) {
-          stream.getTracks().forEach(t => t.stop());
-          stream = null;
-        }
-        cameraOn = false;
-        btnCamera.textContent = "🎥 Nyalakan Kamera";
-        btnDetect.disabled = true;
-        ctxOverlay.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-        setStatus({ live: false, text: "Kamera dimatikan" });
-        return;
+    function updateButtons() {
+      btnOff.disabled = !cameraOn;
+      btnDetect.disabled = !cameraOn || busy;
+    }
+
+    function stopCamera() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
       }
+      cameraOn = false;
+      video.srcObject = null;
+      ctxOverlay.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      setStatus({ live: false, text: "Kamera dimatikan" });
+      updateButtons();
+    }
+
+    async function startCamera(facing = "user") {
+      setError("");
+      currentFacing = facing;
 
       try {
-        btnCamera.disabled = true;
-        btnCamera.textContent = "Mengaktifkan kamera...";
-        const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        stream = s;
+        btnFront.disabled = true;
+        btnBack.disabled = true;
+        btnOff.disabled = true;
+        btnDetect.disabled = true;
+        setStatus({ live: false, text: "Mengaktifkan kamera..." });
+
+        // Matikan stream lama kalau ada
+        if (currentStream) {
+          currentStream.getTracks().forEach(t => t.stop());
+          currentStream = null;
+        }
+
+        const constraints = {
+          video: {
+            facingMode: { ideal: facing }
+          },
+          audio: false
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        currentStream = stream;
         video.srcObject = stream;
-        await new Promise(resolve => video.onloadedmetadata = resolve);
-        resizeOverlay();
+
+        await new Promise(resolve => {
+          video.onloadedmetadata = () => {
+            resizeOverlay();
+            resolve();
+          };
+        });
+
         cameraOn = true;
-        btnCamera.textContent = "⏹ Matikan Kamera";
-        btnDetect.disabled = false;
-        setStatus({ live: true, text: "Kamera aktif – siap deteksi" });
+        const facingLabel = facing === "environment" ? "belakang" : "depan";
+        setStatus({ live: true, text: `Kamera ${facingLabel} aktif – siap deteksi` });
       } catch (err) {
         console.error(err);
         setError("Gagal mengakses kamera. Pastikan izin kamera sudah diberikan di browser.");
         setStatus({ live: false, text: "Kamera gagal diaktifkan" });
+        cameraOn = false;
+        currentStream = null;
       } finally {
-        btnCamera.disabled = false;
+        btnFront.disabled = false;
+        btnBack.disabled = false;
+        updateButtons();
       }
     }
 
     async function captureAndDetect() {
-      if (!cameraOn || busy) return;
+      if (!cameraOn || !currentStream || busy) return;
+
       busy = true;
+      updateButtons();
       setError("");
-      btnDetect.disabled = true;
       btnDetect.textContent = "Memproses...";
       setStatus({ live: true, text: "Mengirim frame ke server..." });
 
       try {
-        // 1) Capture frame ke canvas sementara
-        const captureCanvas = document.createElement("canvas");
-        const cctx = captureCanvas.getContext("2d");
-        captureCanvas.width = video.videoWidth || 640;
-        captureCanvas.height = video.videoHeight || 480;
-        cctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 480;
 
-        // 2) Konversi ke Blob dan kirim sebagai multipart/form-data
+        const captureCanvas = document.createElement("canvas");
+        captureCanvas.width = vw;
+        captureCanvas.height = vh;
+        const cctx = captureCanvas.getContext("2d");
+        cctx.drawImage(video, 0, 0, vw, vh);
+
         const blob = await new Promise(resolve =>
           captureCanvas.toBlob(resolve, "image/jpeg", 0.9)
         );
 
         const form = new FormData();
-        // Backend membaca field bernama "file"
         form.append("file", blob, "frame.jpg");
 
         const t0 = performance.now();
@@ -491,18 +528,16 @@
         setStatus({ live: cameraOn, text: "Terjadi kesalahan saat deteksi" });
       } finally {
         busy = false;
-        btnDetect.disabled = !cameraOn;
         btnDetect.textContent = "🔍 Deteksi Sekarang";
+        updateButtons();
       }
     }
 
     function renderDetections(result, latencyMs) {
-      // result: { width, height, detections: [ {class_name, confidence, x1,y1,x2,y2}, ... ] }
       const dets = result?.detections || [];
       const w = result?.width || video.videoWidth || overlayCanvas.width;
       const h = result?.height || video.videoHeight || overlayCanvas.height;
 
-      // Sesuaikan ukuran canvas overlay
       overlayCanvas.width = w;
       overlayCanvas.height = h;
 
@@ -517,24 +552,21 @@
         return;
       }
 
-      // Draw bounding boxes
       ctxOverlay.lineWidth = 3;
       ctxOverlay.font = "14px system-ui";
       ctxOverlay.textBaseline = "top";
 
       detList.innerHTML = "";
-
       const classCounter = {};
+
       dets.forEach((det, idx) => {
         const { class_name, confidence, x1, y1, x2, y2 } = det;
         const label = class_name || "object";
         const confPct = (confidence * 100).toFixed(1) + "%";
 
-        // Warna berdasarkan index
         const colors = ["#22c55e", "#38bdf8", "#a855f7", "#f97316", "#e11d48"];
         const color = colors[idx % colors.length];
 
-        // Box
         const bw = x2 - x1;
         const bh = y2 - y1;
         ctxOverlay.strokeStyle = color;
@@ -554,7 +586,6 @@
         ctxOverlay.fillStyle = "#f9fafb";
         ctxOverlay.fillText(labelText, tx + textPaddingX, ty + textPaddingY);
 
-        // List item
         const row = document.createElement("div");
         row.className = "det-row";
         row.innerHTML = `
@@ -584,7 +615,10 @@
       lastTime.textContent = new Date().toLocaleTimeString();
     }
 
-    btnCamera.addEventListener("click", startCamera);
+    // Event listeners
+    btnFront.addEventListener("click", () => startCamera("user"));
+    btnBack.addEventListener("click", () => startCamera("environment"));
+    btnOff.addEventListener("click", stopCamera);
     btnDetect.addEventListener("click", captureAndDetect);
 
     window.addEventListener("resize", () => {
@@ -594,7 +628,9 @@
     // Cek support kamera
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setError("Browser ini belum mendukung akses kamera (getUserMedia). Coba gunakan Chrome atau Edge versi terbaru.");
-      btnCamera.disabled = true;
+      btnFront.disabled = true;
+      btnBack.disabled = true;
+      btnOff.disabled = true;
       btnDetect.disabled = true;
       setStatus({ live: false, text: "Browser tidak mendukung kamera" });
     }
