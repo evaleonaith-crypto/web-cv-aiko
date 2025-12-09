@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Realtime Object Detection</title>
+
+  <style>
+    body {
+      font-family: Arial;
+      text-align: center;
+      background: #f8f8f8;
+      padding: 30px;
+    }
+    video, canvas {
+      border: 2px solid #333;
+      border-radius: 8px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>Realtime Object Detection – YOLOv8 API</h2>
+  <video id="video" width="640" height="480" autoplay></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <script>
+    const API_URL = "https://epaa-cv-praktikum-aiko.hf.space/predict";
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Start camera
+    navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+      video.srcObject = stream;
+    });
+
+    async function captureAndSend() {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg"));
+
+      const formData = new FormData();
+      formData.append("file", blob, "frame.jpg");
+
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: formData
+      });
+
+      const data = await res.json();
+      drawDetections(data);
+    }
+
+    function drawDetections(result) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = "red";
+      ctx.lineWidth = 3;
+      ctx.font = "16px Arial";
+      ctx.fillStyle = "red";
+
+      result.detections.forEach(det => {
+        const { x1, y1, x2, y2, class_name, confidence } = det;
+
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.fillText(`${class_name} ${(confidence * 100).toFixed(1)}%`, x1, y1 - 5);
+      });
+    }
+
+    // Loop setiap 500ms
+    setInterval(captureAndSend, 600);
+  </script>
+
+</body>
+</html>
