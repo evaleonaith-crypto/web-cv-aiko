@@ -132,7 +132,7 @@
       display: block;
       width: 100%;
       height: 100%;
-      object-fit: cover; /* Biar muka memenuhi frame, tidak hitam di samping */
+      object-fit: cover; /* supaya wajah memenuhi frame, tidak hitam di samping */
       background: #000;
     }
 
@@ -196,7 +196,7 @@
     }
 
     button:disabled {
-      opacity: 0.6;
+      opacity: 0.5;
       cursor: default;
       box-shadow: none;
       transform: none;
@@ -349,7 +349,8 @@
       <div class="btn-row">
         <button id="btnCamera" class="btn-primary">🎥 Nyalakan Kamera</button>
         <button id="btnDetect" class="btn-secondary" disabled>🔍 Deteksi Sekarang</button>
-        <button id="btnSwitchCam" class="btn-ghost" disabled>🔄 Ganti Kamera</button>
+        <button id="btnFrontCam" class="btn-ghost" disabled>📱 Kamera Depan</button>
+        <button id="btnBackCam" class="btn-ghost" disabled>📷 Kamera Belakang</button>
       </div>
       <div class="status-pill">
         <span id="statusDot" class="status-dot"></span>
@@ -358,8 +359,8 @@
     </div>
 
     <p class="hint">
-      Tip: Arahkan kamera ke laptop, orang, kursi, dll lalu tekan <strong>Deteksi Sekarang</strong>.
-      Di HP, gunakan tombol <strong>Ganti Kamera</strong> untuk memilih depan/belakang.
+      Laptop: pakai webcam bawaan.<br />
+      HP: pilih <strong>Kamera Depan</strong> atau <strong>Kamera Belakang</strong> untuk ganti kamera.
     </p>
 
     <div id="errorBox" class="error" style="display:none;"></div>
@@ -394,7 +395,8 @@
 
   const btnCamera = document.getElementById("btnCamera");
   const btnDetect = document.getElementById("btnDetect");
-  const btnSwitchCam = document.getElementById("btnSwitchCam");
+  const btnFrontCam = document.getElementById("btnFrontCam");
+  const btnBackCam = document.getElementById("btnBackCam");
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
   const errorBox = document.getElementById("errorBox");
@@ -407,7 +409,12 @@
   let busy = false;
 
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  let currentFacingMode = isMobile ? "environment" : "user"; // HP: belakang dulu, laptop: depan
+
+  // daftar device kamera
+  let videoDevices = [];
+  let frontDeviceId = null;
+  let backDeviceId = null;
+  let currentDeviceId = null;
 
   function setStatus({ live = false, text = "" }) {
     statusDot.classList.toggle("live", live);
@@ -424,21 +431,15 @@
     }
   }
 
-  function getVideoConstraints() {
-    const base = {
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
-    };
+  function resizeOverlayToVideo() {
+    if (!video.videoWidth || !video.videoHeight) return;
 
-    if (!isMobile) {
-      return { ...base, facingMode: "user" };
-    }
+    overlayCanvas.width = video.videoWidth;
+    overlayCanvas.height = video.videoHeight;
 
-    if (currentFacingMode === "environment") {
-      return { ...base, facingMode: { ideal: "environment" } };
-    } else {
-      return { ...base, facingMode: "user" };
-    }
+    const wrapper = video.parentElement.getBoundingClientRect();
+    overlayCanvas.style.width = wrapper.width + "px";
+    overlayCanvas.style.height = wrapper.height + "px";
   }
 
   async function stopCamera() {
@@ -451,27 +452,88 @@
     ctxOverlay.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
   }
 
-  function resizeOverlayToVideo() {
-    if (!video.videoWidth || !video.videoHeight) return;
+  async function discoverVideoDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      videoDevices = devices.filter(d => d.kind === "videoinput");
 
-    const wrapper = video.parentElement.getBoundingClientRect();
-    overlayCanvas.width = video.videoWidth;
-    overlayCanvas.height = video.videoHeight;
+      if (!videoDevices.length) return;
 
-    // Scale canvas to fit wrapper
-    overlayCanvas.style.width = wrapper.width + "px";
-    overlayCanvas.style.height = wrapper.height + "px";
+      // reset
+      frontDeviceId = null;
+      backDeviceId = null;
+
+      videoDevices.forEach(d => {
+        const label = (d.label || "").toLowerCase();
+        if (!frontDeviceId && /front|user|face|selfie/.test(label)) {
+          frontDeviceId = d.deviceId;
+        }
+        if (!backDeviceId && /back|rear|environment|world/.test(label)) {
+          backDeviceId = d.deviceId;
+        }
+      });
+
+      // fallback: kalau tidak kebaca labelnya
+      if (!frontDeviceId && videoDevices[0]) {
+        frontDeviceId = videoDevices[0].deviceId;
+      }
+      if (!backDeviceId && videoDevices[1]) {
+        backDeviceId = videoDevices[1].deviceId;
+      }
+      if (!backDeviceId) backDeviceId = frontDeviceId;
+
+      // aktifkan tombol sesuai ketersediaan
+      btnFrontCam.disabled = !frontDeviceId;
+      btnBackCam.disabled = !backDeviceId || backDeviceId === frontDeviceId;
+    } catch (err) {
+      console.warn("Gagal enumerateDevices:", err);
+    }
   }
 
-  async function startCamera() {
+  function buildConstraints(deviceIdPreference) {
+    // kalau deviceId diketahui, gunakan itu (pasti tepat ke kamera yg diinginkan)
+    if (deviceIdPreference) {
+      return {
+        audio: false,
+        video: {
+          deviceId: { exact: deviceIdPreference },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+    }
+
+    // default: laptop pakai webcam "user"
+    if (!isMobile) {
+      return {
+        audio: false,
+        video: {
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+    }
+
+    // mobile: coba environment dulu, kalau gagal nanti fallback
+    return {
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+  }
+
+  async function startCamera(deviceIdPreference = null) {
     setError("");
 
-    if (cameraOn) {
-      // Matikan kamera
+    if (cameraOn && !deviceIdPreference) {
+      // tombol besar: matikan kamera
       await stopCamera();
       btnCamera.textContent = "🎥 Nyalakan Kamera";
       btnDetect.disabled = true;
-      btnSwitchCam.disabled = !isMobile;
       setStatus({ live: false, text: "Kamera dimatikan" });
       return;
     }
@@ -480,16 +542,27 @@
       btnCamera.disabled = true;
       btnCamera.textContent = "Mengaktifkan kamera...";
 
-      let constraints = { audio: false, video: getVideoConstraints() };
+      // stop stream lama kalau ada
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+
+      let constraints = buildConstraints(deviceIdPreference);
 
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
       } catch (err) {
-        // fallback: kalau gagal environment, coba user
-        if (isMobile && currentFacingMode === "environment") {
-          console.warn("Gagal kamera belakang, coba kamera depan:", err);
-          currentFacingMode = "user";
-          constraints = { audio: false, video: getVideoConstraints() };
+        // fallback khusus HP: kalau environment gagal, coba user
+        if (!deviceIdPreference && isMobile) {
+          console.warn("Gagal kamera environment, coba user:", err);
+          constraints = {
+            audio: false,
+            video: {
+              facingMode: "user",
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            }
+          };
           stream = await navigator.mediaDevices.getUserMedia(constraints);
         } else {
           throw err;
@@ -506,30 +579,47 @@
       });
 
       resizeOverlayToVideo();
-
       cameraOn = true;
       btnCamera.textContent = "⏹ Matikan Kamera";
       btnDetect.disabled = false;
-      btnSwitchCam.disabled = !isMobile; // hanya HP yang boleh ganti kamera
-      btnSwitchCam.textContent = currentFacingMode === "environment"
-        ? "🔄 Kamera Belakang (aktif)" : "🔄 Kamera Depan (aktif)";
+
+      // simpan deviceId aktif
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        currentDeviceId = settings.deviceId || null;
+      }
+
+      // setelah dapat izin, enumerate device untuk bedakan depan/belakang
+      await discoverVideoDevices();
+
       setStatus({ live: true, text: "Kamera aktif – siap deteksi" });
     } catch (err) {
       console.error(err);
       setError("Gagal mengakses kamera. Pastikan izin kamera sudah diberikan di browser.");
       setStatus({ live: false, text: "Kamera gagal diaktifkan" });
+      cameraOn = false;
     } finally {
       btnCamera.disabled = false;
     }
   }
 
-  async function switchCamera() {
-    if (!isMobile) return; // di laptop biasanya cuma 1 kamera
+  async function useFrontCamera() {
+    if (!frontDeviceId) {
+      setError("Kamera depan tidak terdeteksi di perangkat ini.");
+      return;
+    }
+    await startCamera(frontDeviceId);
+    setStatus({ live: true, text: "Kamera depan aktif" });
+  }
 
-    // toggle mode
-    currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
-    await stopCamera();
-    await startCamera();
+  async function useBackCamera() {
+    if (!backDeviceId) {
+      setError("Kamera belakang tidak terdeteksi di perangkat ini.");
+      return;
+    }
+    await startCamera(backDeviceId);
+    setStatus({ live: true, text: "Kamera belakang aktif" });
   }
 
   async function captureAndDetect() {
@@ -590,7 +680,6 @@
     overlayCanvas.width = w;
     overlayCanvas.height = h;
 
-    // ukuran visual canvas menyesuaikan wrapper
     const wrapper = video.parentElement.getBoundingClientRect();
     overlayCanvas.style.width = wrapper.width + "px";
     overlayCanvas.style.height = wrapper.height + "px";
@@ -670,24 +759,22 @@
     lastTime.textContent = new Date().toLocaleTimeString();
   }
 
-  btnCamera.addEventListener("click", startCamera);
+  btnCamera.addEventListener("click", () => startCamera());
   btnDetect.addEventListener("click", captureAndDetect);
-  btnSwitchCam.addEventListener("click", switchCamera);
+  btnFrontCam.addEventListener("click", useFrontCamera);
+  btnBackCam.addEventListener("click", useBackCamera);
 
   window.addEventListener("resize", () => {
     if (cameraOn) resizeOverlayToVideo();
   });
 
-  // Cek support kamera
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setError("Browser ini belum mendukung akses kamera (getUserMedia). Coba gunakan Chrome atau Edge versi terbaru.");
     btnCamera.disabled = true;
     btnDetect.disabled = true;
-    btnSwitchCam.disabled = true;
+    btnFrontCam.disabled = true;
+    btnBackCam.disabled = true;
     setStatus({ live: false, text: "Browser tidak mendukung kamera" });
-  } else {
-    // di HP, tombol ganti kamera boleh diaktifkan setelah kamera pertama kali nyala
-    btnSwitchCam.disabled = !isMobile;
   }
 </script>
 </body>
